@@ -118,7 +118,10 @@ declare global {
   }
 }
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
+const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_SITE_BASE_PATH ?? '';
+
+const publicAsset = (path: string) => `${PUBLIC_BASE_PATH}${path}`;
 
 const SAMPLE_JSON = `{
   "project": "Desirializer demo",
@@ -1670,13 +1673,13 @@ export default function Home() {
 
   return (
     <TooltipProvider>
-      <main className="min-h-screen bg-background text-foreground lg:h-screen lg:overflow-hidden">
+      <main className="min-h-screen bg-background text-foreground">
         <header className="border-b border-border bg-card">
           <div className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
             <div className="flex min-w-0 items-center gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-primary/20 bg-primary/10">
                 <Image
-                  src="/desirializer-icon.png"
+                  src={publicAsset('/desirializer-icon.png')}
                   alt=""
                   width={40}
                   height={40}
@@ -1736,7 +1739,7 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="grid min-h-[calc(100vh-89px)] grid-cols-1 lg:h-[calc(100vh-89px)] lg:grid-cols-[380px_minmax(0,1fr)_360px]">
+        <div className="grid min-h-[calc(100vh-89px)] grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)_360px]">
           <section className="border-b border-border bg-card/70 lg:border-b-0 lg:border-r">
             <div className="flex h-full flex-col gap-4 p-4 sm:p-5">
               <div

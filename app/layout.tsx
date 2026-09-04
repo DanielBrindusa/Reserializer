@@ -12,13 +12,16 @@ const geistMono = Geist_Mono({
   subsets: ['latin'],
 });
 
+const publicBasePath = process.env.NEXT_PUBLIC_SITE_BASE_PATH ?? '';
+const publicAsset = (path: string) => `${publicBasePath}${path}`;
+
 export const metadata: Metadata = {
   title: 'Desirializer',
   description:
     'Upload or paste JSON and inspect its nested structure with source line spans.',
   icons: {
-    icon: [{ url: '/desirializer-icon.png', type: 'image/png' }],
-    apple: [{ url: '/desirializer-icon.png', type: 'image/png' }],
+    icon: [{ url: publicAsset('/desirializer-icon.png'), type: 'image/png' }],
+    apple: [{ url: publicAsset('/desirializer-icon.png'), type: 'image/png' }],
   },
 };
 
