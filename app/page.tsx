@@ -1,7 +1,7 @@
 'use client';
 
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import {
   AlertTriangle,
@@ -95,30 +95,7 @@ type ParseOutcome = ParseSuccess | ParseFailure;
 
 type PaneId = 'left' | 'right';
 
-type WebMcpRegistration = {
-  name: string;
-  title?: string;
-  description: string;
-  inputSchema: object;
-  annotations?: {
-    readOnlyHint?: boolean;
-    untrustedContentHint?: boolean;
-  };
-  execute: (input: unknown) => unknown;
-};
-
-declare global {
-  interface Document {
-    modelContext?: {
-      registerTool: (
-        tool: WebMcpRegistration,
-        options?: { signal?: AbortSignal },
-      ) => void | Promise<void>;
-    };
-  }
-}
-
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '1.0.0';
 const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_SITE_BASE_PATH ?? '';
 
 const publicAsset = (path: string) => `${PUBLIC_BASE_PATH}${path}`;
@@ -977,8 +954,7 @@ function nodeSummary(node: JsonNode) {
   }
 
   if (node.type === 'string') {
-    const value = JSON.stringify(node.value);
-    return value.length > 90 ? `${value.slice(0, 87)}...` : value;
+    return JSON.stringify(node.value);
   }
 
   return String(node.value);
@@ -1234,59 +1210,6 @@ function HighlightedText({
   return <>{parts}</>;
 }
 
-function summarizeOutcome(outcome: ParseOutcome, fileName: string) {
-  if (!outcome.ok) {
-    return {
-      ok: false,
-      fileName,
-      message: outcome.message,
-      line: outcome.line,
-      column: outcome.column,
-    };
-  }
-
-  return {
-    ok: true,
-    fileName,
-    mode: outcome.mode,
-    rootPath: outcome.root.path,
-    stats: outcome.stats,
-  };
-}
-
-function validateLoadJsonInput(input: unknown) {
-  if (!input || typeof input !== 'object') {
-    throw new Error('Input must be an object.');
-  }
-
-  const record = input as Record<string, unknown>;
-
-  if (typeof record.source !== 'string') {
-    throw new Error('source must be a string.');
-  }
-
-  if (
-    record.fileName !== undefined &&
-    typeof record.fileName !== 'string'
-  ) {
-    throw new Error('fileName must be a string when provided.');
-  }
-
-  if (
-    record.pane !== undefined &&
-    record.pane !== 'left' &&
-    record.pane !== 'right'
-  ) {
-    throw new Error('pane must be "left" or "right" when provided.');
-  }
-
-  return {
-    source: record.source,
-    fileName: record.fileName?.trim() || 'agent-input.json',
-    pane: (record.pane ?? 'left') as PaneId,
-  };
-}
-
 const initialParse = parseJsonInput(SAMPLE_JSON);
 const initialCompareParse = parseJsonInput(COMPARE_SAMPLE_JSON);
 
@@ -1316,17 +1239,9 @@ export default function Home() {
   const [formattedQuery, setFormattedQuery] = useState('');
   const [copyState, setCopyState] = useState('');
   const [compareMode, setCompareMode] = useState(false);
+  const [sourceCompact, setSourceCompact] = useState(false);
+  const [rightSourceCompact, setRightSourceCompact] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const appStateRef = useRef({
-    source,
-    fileName,
-    parseOutcome,
-    rightSource,
-    rightFileName,
-    rightParseOutcome,
-    compareMode,
-    selectedSide,
-  });
 
   const normalizedQuery = query.trim().toLowerCase();
   const selectedNode = useMemo(() => {
@@ -1394,130 +1309,6 @@ export default function Home() {
 
     return outcome;
   };
-
-  useEffect(() => {
-    appStateRef.current = {
-      source,
-      fileName,
-      parseOutcome,
-      rightSource,
-      rightFileName,
-      rightParseOutcome,
-      compareMode,
-      selectedSide,
-    };
-  }, [
-    source,
-    fileName,
-    parseOutcome,
-    rightSource,
-    rightFileName,
-    rightParseOutcome,
-    compareMode,
-    selectedSide,
-  ]);
-
-  useEffect(() => {
-    const context =
-      typeof document === 'undefined' ? undefined : document.modelContext;
-
-    if (!context?.registerTool) {
-      return;
-    }
-
-    const lifecycle = new AbortController();
-
-    const reportRegistrationError = (error: unknown) => {
-      console.error('Unable to register Desirializer WebMCP tool', error);
-    };
-
-    const register = (tool: WebMcpRegistration) => {
-      try {
-        void Promise.resolve(
-          context.registerTool(tool, { signal: lifecycle.signal }),
-        ).catch(reportRegistrationError);
-      } catch (error) {
-        reportRegistrationError(error);
-      }
-    };
-
-    register({
-      name: 'load_json_source',
-      title: 'Load JSON source',
-      description:
-        'Load JSON text into Desirializer, parse it, and update the visible tree.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          source: {
-            type: 'string',
-            description: 'The JSON text to load and parse.',
-          },
-          fileName: {
-            type: 'string',
-            description: 'Optional display name for the loaded source.',
-          },
-          pane: {
-            type: 'string',
-            enum: ['left', 'right'],
-            description:
-              'Optional pane to load. Use right to load the comparison pane.',
-          },
-        },
-        required: ['source'],
-        additionalProperties: false,
-      },
-      annotations: {
-        readOnlyHint: false,
-        untrustedContentHint: true,
-      },
-      execute(input) {
-        const next = validateLoadJsonInput(input);
-        const outcome = applyParsedPane(
-          next.pane,
-          next.source,
-          next.fileName,
-        );
-
-        if (next.pane === 'right') {
-          setCompareMode(true);
-        }
-
-        return summarizeOutcome(outcome, next.fileName);
-      },
-    });
-
-    register({
-      name: 'read_json_summary',
-      title: 'Read JSON summary',
-      description:
-        'Read the current Desirializer parse status, selected file name, and structure counts.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-      annotations: {
-        readOnlyHint: true,
-        untrustedContentHint: true,
-      },
-      execute() {
-        const current = appStateRef.current;
-        return {
-          version: APP_VERSION,
-          compareMode: current.compareMode,
-          selectedSide: current.selectedSide,
-          left: summarizeOutcome(current.parseOutcome, current.fileName),
-          right: summarizeOutcome(
-            current.rightParseOutcome,
-            current.rightFileName,
-          ),
-        };
-      },
-    });
-
-    return () => lifecycle.abort();
-  }, []);
 
   function runParse(nextSource = source, nextFileName = fileName) {
     applyParsedPane('left', nextSource, nextFileName);
@@ -1818,51 +1609,137 @@ export default function Home() {
                 </Tooltip>
               </div>
 
-              <label
-                className="flex min-h-[300px] flex-1 flex-col gap-2"
-                htmlFor="json-source"
+              <div
+                className={`flex flex-col gap-2 ${
+                  sourceCompact ? 'min-h-0' : 'min-h-[300px] flex-1'
+                }`}
               >
-                <span className="text-sm font-medium">
-                  {compareMode ? 'JSON A source' : 'JSON source'}
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  Paste raw JSON here when you do not have a file.
-                </span>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <label
+                      className="block text-sm font-medium"
+                      htmlFor="json-source"
+                    >
+                      {compareMode ? 'JSON A source' : 'JSON source'}
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Paste raw JSON here when you do not have a file.
+                    </p>
+                  </div>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={
+                            sourceCompact
+                              ? 'Expand JSON source input'
+                              : 'Compact JSON source input'
+                          }
+                          onClick={() =>
+                            setSourceCompact((current) => !current)
+                          }
+                        >
+                          {sourceCompact ? (
+                            <Maximize2 className="size-4" />
+                          ) : (
+                            <Minimize2 className="size-4" />
+                          )}
+                        </Button>
+                      }
+                    />
+                    <TooltipContent>
+                      {sourceCompact ? 'Expand source' : 'Compact source'}
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
                 <Textarea
                   id="json-source"
                   value={source}
                   onChange={(event) => setSource(event.target.value)}
+                  autoComplete="off"
                   spellCheck={false}
-                  className="min-h-[260px] flex-1 resize-none border-border bg-background font-mono text-sm leading-6"
+                  className={`[field-sizing:fixed] resize-y overflow-auto border-border bg-background font-mono text-sm leading-6 ${
+                    sourceCompact
+                      ? 'h-24 min-h-24 max-h-24'
+                      : 'h-[320px] min-h-[220px] flex-1'
+                  }`}
                   placeholder='Paste {"json": true} here'
                 />
-              </label>
+              </div>
 
               {compareMode && (
                 <div className="rounded-lg border border-border bg-background p-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
-                      <p className="text-sm font-medium">JSON B source</p>
+                      <label
+                        className="block text-sm font-medium"
+                        htmlFor="json-source-b"
+                      >
+                        JSON B source
+                      </label>
                       <p className="text-xs text-muted-foreground">
                         Paste text or choose a second file.
                       </p>
                     </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => rightFileInputRef.current?.click()}
-                    >
-                      <FileJson data-icon="inline-start" className="size-4" />
-                      Choose B
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => rightFileInputRef.current?.click()}
+                      >
+                        <FileJson
+                          data-icon="inline-start"
+                          className="size-4"
+                        />
+                        Choose B
+                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={
+                                rightSourceCompact
+                                  ? 'Expand JSON B source input'
+                                  : 'Compact JSON B source input'
+                              }
+                              onClick={() =>
+                                setRightSourceCompact((current) => !current)
+                              }
+                            >
+                              {rightSourceCompact ? (
+                                <Maximize2 className="size-4" />
+                              ) : (
+                                <Minimize2 className="size-4" />
+                              )}
+                            </Button>
+                          }
+                        />
+                        <TooltipContent>
+                          {rightSourceCompact
+                            ? 'Expand source B'
+                            : 'Compact source B'}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
                   </div>
                   <Textarea
                     id="json-source-b"
                     value={rightSource}
                     onChange={(event) => setRightSource(event.target.value)}
+                    autoComplete="off"
                     spellCheck={false}
-                    className="mt-3 min-h-[180px] resize-none border-border bg-card font-mono text-sm leading-6"
+                    className={`mt-3 [field-sizing:fixed] resize-y overflow-auto border-border bg-card font-mono text-sm leading-6 ${
+                      rightSourceCompact
+                        ? 'h-24 min-h-24 max-h-24'
+                        : 'h-[220px] min-h-[160px]'
+                    }`}
                     placeholder='Paste {"compare": true} here'
                   />
                   <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1951,6 +1828,7 @@ export default function Home() {
                   <Input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
+                    autoComplete="off"
                     placeholder={
                       compareMode
                         ? 'Search both trees by path, key, type, or value'
@@ -2288,7 +2166,7 @@ function JsonTreeNode({
   return (
     <div className="py-1">
       <div
-        className={`group flex items-start gap-2 rounded-lg border px-2 py-2 transition-colors ${
+        className={`group flex min-w-0 items-start gap-2 overflow-hidden rounded-lg border px-2 py-2 transition-colors ${
           isSelected
             ? 'border-primary bg-primary/10'
             : isMatch
@@ -2316,7 +2194,7 @@ function JsonTreeNode({
         <button
           type="button"
           aria-label={`Select ${node.path}`}
-          className="grid min-w-0 flex-1 grid-cols-[minmax(140px,0.85fr)_minmax(120px,1.15fr)_150px] items-start gap-3 text-left max-sm:grid-cols-1"
+          className="grid min-w-0 flex-1 grid-cols-1 items-start gap-2 text-left md:grid-cols-[minmax(120px,0.75fr)_minmax(160px,1.25fr)]"
           onClick={() => onSelect(node.id)}
         >
           <span className="min-w-0">
@@ -2329,19 +2207,21 @@ function JsonTreeNode({
           </span>
 
           <span className="min-w-0">
-            <span className={`font-mono text-sm ${tone.text}`}>
+            <span
+              className={`block max-h-28 max-w-full overflow-auto whitespace-pre-wrap break-all pr-1 font-mono text-sm ${tone.text}`}
+            >
               {hasChildren
                 ? `${openingToken(node)} ${nodeSummary(node)}`
                 : nodeSummary(node)}
             </span>
-            <span className="block truncate text-xs text-muted-foreground">
+            <span className="block break-words text-xs text-muted-foreground">
               {hasChildren
                 ? `starts ${lineLabel(node.start)}, ends ${lineLabel(node.end)}`
                 : `value at ${spanLabel}`}
             </span>
           </span>
 
-          <span className="flex flex-wrap justify-start gap-2">
+          <span className="flex min-w-0 flex-wrap justify-start gap-2 md:col-span-2">
             <Badge variant="outline" className={tone.badge}>
               {node.type}
             </Badge>
@@ -2419,13 +2299,7 @@ function Inspector({
   }
 
   const rawSlice = source.slice(node.startIndex, node.endIndex);
-  const preview =
-    rawSlice.length > 1400 ? `${rawSlice.slice(0, 1400)}\n...` : rawSlice;
   const reserialized = stringifyJsonValue(node.value);
-  const reserializedPreview =
-    reserialized.length > 10000
-      ? `${reserialized.slice(0, 10000)}\n...`
-      : reserialized;
   const formattedSearch = findFormattedLines(reserialized, formattedQuery);
   const tone = typeTone(node.type);
 
@@ -2484,8 +2358,8 @@ function Inspector({
 
           <div>
             <p className="mb-2 text-sm font-medium">Raw source slice</p>
-            <pre className="max-h-[420px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
-              <code>{preview}</code>
+            <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
+              <code>{rawSlice}</code>
             </pre>
           </div>
 
@@ -2502,6 +2376,7 @@ function Inspector({
                   onChange={(event) =>
                     onFormattedQueryChange(event.target.value)
                   }
+                  autoComplete="off"
                   placeholder="Find inside the formatted JSON"
                   className="pl-8"
                   aria-label="Find inside reserialized JSON"
@@ -2517,7 +2392,7 @@ function Inspector({
               )}
             </div>
 
-            <pre className="max-h-[460px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
+            <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
               <code>
                 {formattedQuery.trim() ? (
                   formattedSearch.lines.length > 0 ? (
@@ -2543,7 +2418,7 @@ function Inspector({
                     'No matches in the reserialized JSON.'
                   )
                 ) : (
-                  reserializedPreview
+                  reserialized
                 )}
               </code>
             </pre>
