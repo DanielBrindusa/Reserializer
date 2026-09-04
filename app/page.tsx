@@ -2,6 +2,7 @@
 
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Image from 'next/image';
 import {
   AlertTriangle,
   Braces,
@@ -92,6 +93,8 @@ type ParseFailure = {
 
 type ParseOutcome = ParseSuccess | ParseFailure;
 
+type PaneId = 'left' | 'right';
+
 type WebMcpRegistration = {
   name: string;
   title?: string;
@@ -114,6 +117,8 @@ declare global {
     };
   }
 }
+
+const APP_VERSION = '0.2.0';
 
 const SAMPLE_JSON = `{
   "project": "Desirializer demo",
@@ -142,6 +147,37 @@ const SAMPLE_JSON = `{
     }
   ],
   "meta": null
+}`;
+
+const COMPARE_SAMPLE_JSON = `{
+  "project": "Desirializer demo",
+  "version": 2,
+  "request": {
+    "source": "compare pane",
+    "acceptedFiles": [".json", ".txt"],
+    "strictJson": true
+  },
+  "records": [
+    {
+      "id": "usr_101",
+      "profile": {
+        "name": "Ada",
+        "active": true,
+        "roles": ["admin", "reviewer", "owner"]
+      }
+    },
+    {
+      "id": "usr_103",
+      "profile": {
+        "name": "Lin",
+        "active": true,
+        "roles": ["reader"]
+      }
+    }
+  ],
+  "meta": {
+    "changed": true
+  }
 }`;
 
 function buildLineStarts(source: string) {
@@ -1055,6 +1091,146 @@ function countMatches(root: JsonNode, query: string) {
   return count;
 }
 
+function stringifyJsonValue(value: unknown) {
+  return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(',')}}`;
+}
+
+function compareRoots(left: ParseOutcome, right: ParseOutcome) {
+  if (!left.ok || !right.ok) {
+    return null;
+  }
+
+  return {
+    equal: canonicalJson(left.root.value) === canonicalJson(right.root.value),
+    nodeDelta: right.stats.nodes - left.stats.nodes,
+    objectDelta: right.stats.objects - left.stats.objects,
+    arrayDelta: right.stats.arrays - left.stats.arrays,
+    valueDelta: right.stats.values - left.stats.values,
+  };
+}
+
+function countOccurrences(text: string, query: string) {
+  if (!query) {
+    return 0;
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  let count = 0;
+  let from = 0;
+
+  while (from < lowerText.length) {
+    const index = lowerText.indexOf(lowerQuery, from);
+
+    if (index === -1) {
+      break;
+    }
+
+    count += 1;
+    from = index + lowerQuery.length;
+  }
+
+  return count;
+}
+
+function findFormattedLines(text: string, query: string) {
+  const trimmed = query.trim();
+
+  if (!trimmed) {
+    return {
+      count: 0,
+      lines: [] as Array<{ number: number; text: string }>,
+      totalLines: text.split('\n').length,
+      limited: false,
+    };
+  }
+
+  const matchingLines: Array<{ number: number; text: string }> = [];
+  const lines = text.split('\n');
+  let count = 0;
+  let matchedLineCount = 0;
+
+  lines.forEach((line, index) => {
+    const lineCount = countOccurrences(line, trimmed);
+
+    if (lineCount > 0) {
+      count += lineCount;
+      matchedLineCount += 1;
+
+      if (matchingLines.length < 80) {
+        matchingLines.push({ number: index + 1, text: line });
+      }
+    }
+  });
+
+  return {
+    count,
+    lines: matchingLines,
+    totalLines: matchedLineCount,
+    limited: matchedLineCount > matchingLines.length,
+  };
+}
+
+function HighlightedText({
+  text,
+  query,
+}: {
+  text: string;
+  query: string;
+}) {
+  const trimmed = query.trim();
+
+  if (!trimmed) {
+    return <>{text}</>;
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = trimmed.toLowerCase();
+  const parts: ReactNode[] = [];
+  let from = 0;
+
+  while (from < text.length) {
+    const index = lowerText.indexOf(lowerQuery, from);
+
+    if (index === -1) {
+      parts.push(text.slice(from));
+      break;
+    }
+
+    if (index > from) {
+      parts.push(text.slice(from, index));
+    }
+
+    parts.push(
+      <mark
+        className="rounded bg-amber-200 px-0.5 text-amber-950"
+        key={`${index}-${from}`}
+      >
+        {text.slice(index, index + trimmed.length)}
+      </mark>,
+    );
+    from = index + trimmed.length;
+  }
+
+  return <>{parts}</>;
+}
+
 function summarizeOutcome(outcome: ParseOutcome, fileName: string) {
   if (!outcome.ok) {
     return {
@@ -1093,49 +1269,150 @@ function validateLoadJsonInput(input: unknown) {
     throw new Error('fileName must be a string when provided.');
   }
 
+  if (
+    record.pane !== undefined &&
+    record.pane !== 'left' &&
+    record.pane !== 'right'
+  ) {
+    throw new Error('pane must be "left" or "right" when provided.');
+  }
+
   return {
     source: record.source,
     fileName: record.fileName?.trim() || 'agent-input.json',
+    pane: (record.pane ?? 'left') as PaneId,
   };
 }
 
 const initialParse = parseJsonInput(SAMPLE_JSON);
+const initialCompareParse = parseJsonInput(COMPARE_SAMPLE_JSON);
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const rightFileInputRef = useRef<HTMLInputElement | null>(null);
   const [source, setSource] = useState(SAMPLE_JSON);
   const [fileName, setFileName] = useState('demo.json');
   const [parseOutcome, setParseOutcome] = useState<ParseOutcome>(initialParse);
+  const [rightSource, setRightSource] = useState(COMPARE_SAMPLE_JSON);
+  const [rightFileName, setRightFileName] = useState('compare.json');
+  const [rightParseOutcome, setRightParseOutcome] =
+    useState<ParseOutcome>(initialCompareParse);
   const [expanded, setExpanded] = useState<Set<string>>(() =>
     initialParse.ok ? defaultExpanded(initialParse.root) : new Set(),
+  );
+  const [rightExpanded, setRightExpanded] = useState<Set<string>>(() =>
+    initialCompareParse.ok
+      ? defaultExpanded(initialCompareParse.root)
+      : new Set(),
   );
   const [selectedId, setSelectedId] = useState(() =>
     initialParse.ok ? initialParse.root.id : '',
   );
+  const [selectedSide, setSelectedSide] = useState<PaneId>('left');
   const [query, setQuery] = useState('');
+  const [formattedQuery, setFormattedQuery] = useState('');
   const [copyState, setCopyState] = useState('');
+  const [compareMode, setCompareMode] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const appStateRef = useRef({ source, fileName, parseOutcome });
+  const appStateRef = useRef({
+    source,
+    fileName,
+    parseOutcome,
+    rightSource,
+    rightFileName,
+    rightParseOutcome,
+    compareMode,
+    selectedSide,
+  });
 
   const normalizedQuery = query.trim().toLowerCase();
   const selectedNode = useMemo(() => {
-    if (!parseOutcome.ok) {
+    const outcome = selectedSide === 'right' ? rightParseOutcome : parseOutcome;
+
+    if (!outcome.ok) {
       return null;
     }
 
-    return findNode(parseOutcome.root, selectedId) ?? parseOutcome.root;
-  }, [parseOutcome, selectedId]);
+    return findNode(outcome.root, selectedId) ?? outcome.root;
+  }, [parseOutcome, rightParseOutcome, selectedId, selectedSide]);
+  const selectedSource = selectedSide === 'right' ? rightSource : source;
   const matchCount = useMemo(() => {
-    if (!parseOutcome.ok || !normalizedQuery) {
+    if (!normalizedQuery) {
       return null;
     }
 
-    return countMatches(parseOutcome.root, normalizedQuery);
-  }, [parseOutcome, normalizedQuery]);
+    let total = parseOutcome.ok
+      ? countMatches(parseOutcome.root, normalizedQuery)
+      : 0;
+
+    if (compareMode && rightParseOutcome.ok) {
+      total += countMatches(rightParseOutcome.root, normalizedQuery);
+    }
+
+    return total;
+  }, [compareMode, parseOutcome, rightParseOutcome, normalizedQuery]);
+  const comparison = useMemo(
+    () => compareRoots(parseOutcome, rightParseOutcome),
+    [parseOutcome, rightParseOutcome],
+  );
+  const anyParsed = parseOutcome.ok || (compareMode && rightParseOutcome.ok);
+  const allVisibleParsed =
+    parseOutcome.ok && (!compareMode || rightParseOutcome.ok);
+
+  const applyParsedPane = (
+    pane: PaneId,
+    nextSource: string,
+    nextFileName: string,
+  ) => {
+    const outcome = parseJsonInput(nextSource);
+
+    if (pane === 'right') {
+      setRightSource(nextSource);
+      setRightFileName(nextFileName);
+      setRightParseOutcome(outcome);
+      setRightExpanded(outcome.ok ? defaultExpanded(outcome.root) : new Set());
+    } else {
+      setSource(nextSource);
+      setFileName(nextFileName);
+      setParseOutcome(outcome);
+      setExpanded(outcome.ok ? defaultExpanded(outcome.root) : new Set());
+    }
+
+    setSelectedSide(pane);
+    setQuery('');
+    setCopyState('');
+    setFormattedQuery('');
+
+    if (outcome.ok) {
+      setSelectedId(outcome.root.id);
+    } else {
+      setSelectedId('');
+    }
+
+    return outcome;
+  };
 
   useEffect(() => {
-    appStateRef.current = { source, fileName, parseOutcome };
-  }, [source, fileName, parseOutcome]);
+    appStateRef.current = {
+      source,
+      fileName,
+      parseOutcome,
+      rightSource,
+      rightFileName,
+      rightParseOutcome,
+      compareMode,
+      selectedSide,
+    };
+  }, [
+    source,
+    fileName,
+    parseOutcome,
+    rightSource,
+    rightFileName,
+    rightParseOutcome,
+    compareMode,
+    selectedSide,
+  ]);
 
   useEffect(() => {
     const context =
@@ -1177,6 +1454,12 @@ export default function Home() {
             type: 'string',
             description: 'Optional display name for the loaded source.',
           },
+          pane: {
+            type: 'string',
+            enum: ['left', 'right'],
+            description:
+              'Optional pane to load. Use right to load the comparison pane.',
+          },
         },
         required: ['source'],
         additionalProperties: false,
@@ -1187,20 +1470,14 @@ export default function Home() {
       },
       execute(input) {
         const next = validateLoadJsonInput(input);
-        const outcome = parseJsonInput(next.source);
+        const outcome = applyParsedPane(
+          next.pane,
+          next.source,
+          next.fileName,
+        );
 
-        setSource(next.source);
-        setFileName(next.fileName);
-        setParseOutcome(outcome);
-        setQuery('');
-        setCopyState('');
-
-        if (outcome.ok) {
-          setExpanded(defaultExpanded(outcome.root));
-          setSelectedId(outcome.root.id);
-        } else {
-          setExpanded(new Set());
-          setSelectedId('');
+        if (next.pane === 'right') {
+          setCompareMode(true);
         }
 
         return summarizeOutcome(outcome, next.fileName);
@@ -1223,7 +1500,16 @@ export default function Home() {
       },
       execute() {
         const current = appStateRef.current;
-        return summarizeOutcome(current.parseOutcome, current.fileName);
+        return {
+          version: APP_VERSION,
+          compareMode: current.compareMode,
+          selectedSide: current.selectedSide,
+          left: summarizeOutcome(current.parseOutcome, current.fileName),
+          right: summarizeOutcome(
+            current.rightParseOutcome,
+            current.rightFileName,
+          ),
+        };
       },
     });
 
@@ -1231,20 +1517,17 @@ export default function Home() {
   }, []);
 
   function runParse(nextSource = source, nextFileName = fileName) {
-    const outcome = parseJsonInput(nextSource);
-    setParseOutcome(outcome);
-    setFileName(nextFileName);
-
-    if (outcome.ok) {
-      setExpanded(defaultExpanded(outcome.root));
-      setSelectedId(outcome.root.id);
-      setQuery('');
-    } else {
-      setSelectedId('');
-    }
+    applyParsedPane('left', nextSource, nextFileName);
   }
 
-  async function readFile(file: File) {
+  function runRightParse(
+    nextSource = rightSource,
+    nextFileName = rightFileName,
+  ) {
+    applyParsedPane('right', nextSource, nextFileName);
+  }
+
+  async function readFile(file: File, pane: PaneId = 'left') {
     const extensionOk = /\.(json|txt)$/i.test(file.name);
     const mimeOk =
       file.type === 'application/json' ||
@@ -1252,27 +1535,40 @@ export default function Home() {
       file.type === '';
 
     if (!extensionOk && !mimeOk) {
-      setParseOutcome({
+      const failure: ParseFailure = {
         ok: false,
         message: 'Upload a .json or .txt file.',
         line: 1,
         column: 1,
         excerpt: file.name,
         pointer: '^',
-      });
+      };
+
+      if (pane === 'right') {
+        setRightParseOutcome(failure);
+        setRightExpanded(new Set());
+      } else {
+        setParseOutcome(failure);
+        setExpanded(new Set());
+      }
+
+      setSelectedSide(pane);
+      setSelectedId('');
       return;
     }
 
     const text = await file.text();
-    setSource(text);
-    runParse(text, file.name);
+    applyParsedPane(pane, text, file.name);
   }
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+  function handleFileChange(
+    event: ChangeEvent<HTMLInputElement>,
+    pane: PaneId = 'left',
+  ) {
     const file = event.target.files?.[0];
 
     if (file) {
-      void readFile(file);
+      void readFile(file, pane);
     }
 
     event.target.value = '';
@@ -1285,12 +1581,14 @@ export default function Home() {
     const file = event.dataTransfer.files[0];
 
     if (file) {
-      void readFile(file);
+      void readFile(file, 'left');
     }
   }
 
-  function toggleNode(id: string) {
-    setExpanded((current) => {
+  function toggleNode(id: string, pane: PaneId = 'left') {
+    const setPaneExpanded = pane === 'right' ? setRightExpanded : setExpanded;
+
+    setPaneExpanded((current) => {
       const next = new Set(current);
 
       if (next.has(id)) {
@@ -1304,19 +1602,23 @@ export default function Home() {
   }
 
   function expandAll() {
-    if (!parseOutcome.ok) {
-      return;
+    if (parseOutcome.ok) {
+      setExpanded(new Set(collectExpandableIds(parseOutcome.root)));
     }
 
-    setExpanded(new Set(collectExpandableIds(parseOutcome.root)));
+    if (compareMode && rightParseOutcome.ok) {
+      setRightExpanded(new Set(collectExpandableIds(rightParseOutcome.root)));
+    }
   }
 
   function collapseAll() {
-    if (!parseOutcome.ok) {
-      return;
+    if (parseOutcome.ok) {
+      setExpanded(new Set([parseOutcome.root.id]));
     }
 
-    setExpanded(new Set([parseOutcome.root.id]));
+    if (compareMode && rightParseOutcome.ok) {
+      setRightExpanded(new Set([rightParseOutcome.root.id]));
+    }
   }
 
   async function copyPath() {
@@ -1339,13 +1641,31 @@ export default function Home() {
     runParse(SAMPLE_JSON, 'demo.json');
   }
 
+  function loadCompareSample() {
+    setRightSource(COMPARE_SAMPLE_JSON);
+    runRightParse(COMPARE_SAMPLE_JSON, 'compare.json');
+  }
+
   function clearInput() {
     setSource('');
     setFileName('untitled');
     setParseOutcome(parseJsonInput(''));
     setExpanded(new Set());
+    setSelectedSide('left');
     setSelectedId('');
     setQuery('');
+    setFormattedQuery('');
+  }
+
+  function clearCompareInput() {
+    setRightSource('');
+    setRightFileName('compare.json');
+    setRightParseOutcome(parseJsonInput(''));
+    setRightExpanded(new Set());
+    setSelectedSide('right');
+    setSelectedId('');
+    setQuery('');
+    setFormattedQuery('');
   }
 
   return (
@@ -1354,8 +1674,15 @@ export default function Home() {
         <header className="border-b border-border bg-card">
           <div className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
-                <Braces className="size-5" aria-hidden="true" />
+              <div className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-primary/20 bg-primary/10">
+                <Image
+                  src="/desirializer-icon.png"
+                  alt=""
+                  width={40}
+                  height={40}
+                  className="size-full object-cover"
+                  priority
+                />
               </div>
               <div className="min-w-0">
                 <h1 className="truncate text-xl font-semibold">Desirializer</h1>
@@ -1367,7 +1694,7 @@ export default function Home() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {parseOutcome.ok ? (
+              {allVisibleParsed ? (
                 <Badge className="border-emerald-200 bg-emerald-50 text-emerald-800">
                   <CheckCircle2 data-icon="inline-start" className="size-3" />
                   Parsed
@@ -1378,9 +1705,15 @@ export default function Home() {
                   Needs valid JSON
                 </Badge>
               )}
+              <Badge variant="outline">v{APP_VERSION}</Badge>
               <Badge variant="outline" className="max-w-[220px] truncate">
-                {fileName}
+                {compareMode ? `A ${fileName}` : fileName}
               </Badge>
+              {compareMode && (
+                <Badge variant="outline" className="max-w-[220px] truncate">
+                  B {rightFileName}
+                </Badge>
+              )}
               {parseOutcome.ok && (
                 <Badge variant="outline">
                   {parseOutcome.mode === 'stream'
@@ -1388,11 +1721,22 @@ export default function Home() {
                     : 'single root'}
                 </Badge>
               )}
+              <Button
+                type="button"
+                variant={compareMode ? 'default' : 'outline'}
+                onClick={() => {
+                  setCompareMode((current) => !current);
+                  setFormattedQuery('');
+                }}
+              >
+                <ListTree data-icon="inline-start" className="size-4" />
+                Compare
+              </Button>
             </div>
           </div>
         </header>
 
-        <div className="grid min-h-[calc(100vh-89px)] grid-cols-1 lg:h-[calc(100vh-89px)] lg:grid-cols-[360px_minmax(0,1fr)_330px]">
+        <div className="grid min-h-[calc(100vh-89px)] grid-cols-1 lg:h-[calc(100vh-89px)] lg:grid-cols-[380px_minmax(0,1fr)_360px]">
           <section className="border-b border-border bg-card/70 lg:border-b-0 lg:border-r">
             <div className="flex h-full flex-col gap-4 p-4 sm:p-5">
               <div
@@ -1416,13 +1760,22 @@ export default function Home() {
                   accept=".json,.txt,application/json,text/plain"
                   onChange={handleFileChange}
                 />
+                <input
+                  ref={rightFileInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept=".json,.txt,application/json,text/plain"
+                  onChange={(event) => handleFileChange(event, 'right')}
+                />
                 <div className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
                   <Upload className="size-5" aria-hidden="true" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium">Drop a JSON or text file</p>
+                  <p className="text-sm font-medium">
+                    Drop a JSON or text file
+                  </p>
                   <p className="text-sm text-muted-foreground">
-                    Files are read in your browser.
+                    Or paste JSON text below.
                   </p>
                 </div>
                 <Button
@@ -1438,11 +1791,11 @@ export default function Home() {
               <div className="flex flex-wrap items-center gap-2">
                 <Button type="button" onClick={() => runParse()}>
                   <ListTree data-icon="inline-start" className="size-4" />
-                  Parse
+                  {compareMode ? 'Parse A' : 'Parse'}
                 </Button>
                 <Button type="button" variant="outline" onClick={loadSample}>
                   <FileText data-icon="inline-start" className="size-4" />
-                  Sample
+                  Sample A
                 </Button>
                 <Tooltip>
                   <TooltipTrigger
@@ -1463,25 +1816,103 @@ export default function Home() {
               </div>
 
               <label
-                className="flex min-h-[360px] flex-1 flex-col gap-2"
+                className="flex min-h-[300px] flex-1 flex-col gap-2"
                 htmlFor="json-source"
               >
-                <span className="text-sm font-medium">JSON source</span>
+                <span className="text-sm font-medium">
+                  {compareMode ? 'JSON A source' : 'JSON source'}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Paste raw JSON here when you do not have a file.
+                </span>
                 <Textarea
                   id="json-source"
                   value={source}
                   onChange={(event) => setSource(event.target.value)}
                   spellCheck={false}
-                  className="min-h-[320px] flex-1 resize-none border-border bg-background font-mono text-sm leading-6"
+                  className="min-h-[260px] flex-1 resize-none border-border bg-background font-mono text-sm leading-6"
                   placeholder='Paste {"json": true} here'
                 />
               </label>
+
+              {compareMode && (
+                <div className="rounded-lg border border-border bg-background p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium">JSON B source</p>
+                      <p className="text-xs text-muted-foreground">
+                        Paste text or choose a second file.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => rightFileInputRef.current?.click()}
+                    >
+                      <FileJson data-icon="inline-start" className="size-4" />
+                      Choose B
+                    </Button>
+                  </div>
+                  <Textarea
+                    id="json-source-b"
+                    value={rightSource}
+                    onChange={(event) => setRightSource(event.target.value)}
+                    spellCheck={false}
+                    className="mt-3 min-h-[180px] resize-none border-border bg-card font-mono text-sm leading-6"
+                    placeholder='Paste {"compare": true} here'
+                  />
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => runRightParse()}
+                    >
+                      <ListTree data-icon="inline-start" className="size-4" />
+                      Parse B
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={loadCompareSample}
+                    >
+                      <FileText data-icon="inline-start" className="size-4" />
+                      Sample B
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearCompareInput}
+                    >
+                      Clear B
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 
           <section className="flex min-h-[560px] flex-col bg-background lg:min-h-0">
             <div className="border-b border-border p-4 sm:p-5">
-              {parseOutcome.ok ? (
+              {compareMode ? (
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <DatasetSummary
+                    label="JSON A"
+                    fileName={fileName}
+                    outcome={parseOutcome}
+                  />
+                  <DatasetSummary
+                    label="JSON B"
+                    fileName={rightFileName}
+                    outcome={rightParseOutcome}
+                  />
+                  {comparison && (
+                    <ComparisonSummary comparison={comparison} />
+                  )}
+                </div>
+              ) : parseOutcome.ok ? (
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <StatCell
                     icon={<Database className="size-4" />}
@@ -1517,9 +1948,13 @@ export default function Home() {
                   <Input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search path, key, type, or value"
+                    placeholder={
+                      compareMode
+                        ? 'Search both trees by path, key, type, or value'
+                        : 'Search path, key, type, or value'
+                    }
                     className="pl-8"
-                    disabled={!parseOutcome.ok}
+                    disabled={!anyParsed}
                   />
                 </div>
 
@@ -1533,7 +1968,7 @@ export default function Home() {
                           size="icon"
                           aria-label="Expand all"
                           onClick={expandAll}
-                          disabled={!parseOutcome.ok}
+                          disabled={!anyParsed}
                         >
                           <Maximize2 className="size-4" />
                         </Button>
@@ -1550,7 +1985,7 @@ export default function Home() {
                           size="icon"
                           aria-label="Collapse all"
                           onClick={collapseAll}
-                          disabled={!parseOutcome.ok}
+                          disabled={!anyParsed}
                         >
                           <Minimize2 className="size-4" />
                         </Button>
@@ -1561,7 +1996,7 @@ export default function Home() {
                 </div>
               </div>
 
-              {parseOutcome.ok && normalizedQuery && (
+              {anyParsed && normalizedQuery && (
                 <p className="mt-2 text-sm text-muted-foreground">
                   {matchCount} {matchCount === 1 ? 'match' : 'matches'} visible
                   with ancestors.
@@ -1570,15 +2005,55 @@ export default function Home() {
             </div>
 
             <ScrollArea className="flex-1">
-              <div className="min-w-[720px] p-4 sm:p-5">
-                {parseOutcome.ok ? (
-                  <JsonTreeNode
-                    node={parseOutcome.root}
+              <div
+                className={`p-4 sm:p-5 ${
+                  compareMode ? 'min-w-[980px]' : 'min-w-[720px]'
+                }`}
+              >
+                {compareMode ? (
+                  <div className="grid gap-4 xl:grid-cols-2">
+                    <TreePane
+                      label="JSON A"
+                      outcome={parseOutcome}
+                      expanded={expanded}
+                      selectedId={selectedSide === 'left' ? selectedId : ''}
+                      query={normalizedQuery}
+                      onToggle={(id) => toggleNode(id, 'left')}
+                      onSelect={(id) => {
+                        setSelectedSide('left');
+                        setSelectedId(id);
+                        setCopyState('');
+                        setFormattedQuery('');
+                      }}
+                    />
+                    <TreePane
+                      label="JSON B"
+                      outcome={rightParseOutcome}
+                      expanded={rightExpanded}
+                      selectedId={selectedSide === 'right' ? selectedId : ''}
+                      query={normalizedQuery}
+                      onToggle={(id) => toggleNode(id, 'right')}
+                      onSelect={(id) => {
+                        setSelectedSide('right');
+                        setSelectedId(id);
+                        setCopyState('');
+                        setFormattedQuery('');
+                      }}
+                    />
+                  </div>
+                ) : parseOutcome.ok ? (
+                  <TreePane
+                    outcome={parseOutcome}
                     expanded={expanded}
-                    selectedId={selectedNode?.id ?? ''}
+                    selectedId={selectedId}
                     query={normalizedQuery}
-                    onToggle={toggleNode}
-                    onSelect={setSelectedId}
+                    onToggle={(id) => toggleNode(id, 'left')}
+                    onSelect={(id) => {
+                      setSelectedSide('left');
+                      setSelectedId(id);
+                      setCopyState('');
+                      setFormattedQuery('');
+                    }}
                   />
                 ) : (
                   <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
@@ -1592,7 +2067,10 @@ export default function Home() {
           <aside className="border-t border-border bg-card/70 lg:border-l lg:border-t-0">
             <Inspector
               node={selectedNode}
-              source={source}
+              source={selectedSource}
+              paneLabel={selectedSide === 'right' ? 'JSON B' : 'JSON A'}
+              formattedQuery={formattedQuery}
+              onFormattedQueryChange={setFormattedQuery}
               copyState={copyState}
               onCopyPath={() => void copyPath()}
             />
@@ -1638,6 +2116,142 @@ function ErrorPanel({ error }: { error: ParseFailure }) {
           </pre>
         </div>
       </div>
+    </div>
+  );
+}
+
+function DatasetSummary({
+  label,
+  fileName,
+  outcome,
+}: {
+  label: string;
+  fileName: string;
+  outcome: ParseOutcome;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold">{label}</p>
+          <p className="truncate text-xs text-muted-foreground">{fileName}</p>
+        </div>
+        {outcome.ok ? (
+          <Badge className="border-emerald-200 bg-emerald-50 text-emerald-800">
+            parsed
+          </Badge>
+        ) : (
+          <Badge variant="destructive">error</Badge>
+        )}
+      </div>
+
+      {outcome.ok ? (
+        <div className="grid grid-cols-4 gap-2 text-sm">
+          <MiniStat label="Nodes" value={String(outcome.stats.nodes)} />
+          <MiniStat label="Objects" value={String(outcome.stats.objects)} />
+          <MiniStat label="Arrays" value={String(outcome.stats.arrays)} />
+          <MiniStat label="Size" value={formatBytes(outcome.stats.bytes)} />
+        </div>
+      ) : (
+        <p className="text-sm text-destructive">
+          Line {outcome.line}, column {outcome.column}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="truncate text-xs text-muted-foreground">{label}</p>
+      <p className="truncate font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function ComparisonSummary({
+  comparison,
+}: {
+  comparison: NonNullable<ReturnType<typeof compareRoots>>;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-3 xl:col-span-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge
+          className={
+            comparison.equal
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-amber-200 bg-amber-50 text-amber-800'
+          }
+        >
+          {comparison.equal ? 'same data' : 'different data'}
+        </Badge>
+        <span className="text-sm text-muted-foreground">
+          B vs A: {formatSigned(comparison.nodeDelta)} nodes,{' '}
+          {formatSigned(comparison.objectDelta)} objects,{' '}
+          {formatSigned(comparison.arrayDelta)} arrays,{' '}
+          {formatSigned(comparison.valueDelta)} values.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function formatSigned(value: number) {
+  if (value > 0) {
+    return `+${value}`;
+  }
+
+  return String(value);
+}
+
+function TreePane({
+  label,
+  outcome,
+  expanded,
+  selectedId,
+  query,
+  onToggle,
+  onSelect,
+}: {
+  label?: string;
+  outcome: ParseOutcome;
+  expanded: Set<string>;
+  selectedId: string;
+  query: string;
+  onToggle: (id: string) => void;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="min-w-0">
+      {label && (
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">{label}</h2>
+          {outcome.ok && (
+            <Badge variant="outline">
+              {outcome.mode === 'stream'
+                ? `${outcome.stats.roots} roots`
+                : 'single root'}
+            </Badge>
+          )}
+        </div>
+      )}
+
+      {outcome.ok ? (
+        <JsonTreeNode
+          node={outcome.root}
+          expanded={expanded}
+          selectedId={selectedId}
+          query={query}
+          onToggle={onToggle}
+          onSelect={onSelect}
+        />
+      ) : (
+        <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
+          Fix this source, then parse again.
+        </div>
+      )}
     </div>
   );
 }
@@ -1776,11 +2390,17 @@ function JsonTreeNode({
 function Inspector({
   node,
   source,
+  paneLabel,
+  formattedQuery,
+  onFormattedQueryChange,
   copyState,
   onCopyPath,
 }: {
   node: JsonNode | null;
   source: string;
+  paneLabel: string;
+  formattedQuery: string;
+  onFormattedQueryChange: (query: string) => void;
   copyState: string;
   onCopyPath: () => void;
 }) {
@@ -1798,6 +2418,12 @@ function Inspector({
   const rawSlice = source.slice(node.startIndex, node.endIndex);
   const preview =
     rawSlice.length > 1400 ? `${rawSlice.slice(0, 1400)}\n...` : rawSlice;
+  const reserialized = stringifyJsonValue(node.value);
+  const reserializedPreview =
+    reserialized.length > 10000
+      ? `${reserialized.slice(0, 10000)}\n...`
+      : reserialized;
+  const formattedSearch = findFormattedLines(reserialized, formattedQuery);
   const tone = typeTone(node.type);
 
   return (
@@ -1807,7 +2433,7 @@ function Inspector({
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold">Inspector</h2>
             <p className="mt-1 truncate font-mono text-sm text-muted-foreground">
-              {node.path}
+              {paneLabel} {node.path}
             </p>
           </div>
           <Button
@@ -1857,6 +2483,66 @@ function Inspector({
             <p className="mb-2 text-sm font-medium">Raw source slice</p>
             <pre className="max-h-[420px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
               <code>{preview}</code>
+            </pre>
+          </div>
+
+          <div>
+            <div className="mb-2 flex flex-col gap-2">
+              <p className="text-sm font-medium">Reserialized JSON</p>
+              <div className="relative">
+                <Search
+                  className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <Input
+                  value={formattedQuery}
+                  onChange={(event) =>
+                    onFormattedQueryChange(event.target.value)
+                  }
+                  placeholder="Find inside the formatted JSON"
+                  className="pl-8"
+                  aria-label="Find inside reserialized JSON"
+                />
+              </div>
+              {formattedQuery.trim() && (
+                <p className="text-xs text-muted-foreground">
+                  {formattedSearch.count}{' '}
+                  {formattedSearch.count === 1 ? 'match' : 'matches'} across{' '}
+                  {formattedSearch.totalLines}{' '}
+                  {formattedSearch.totalLines === 1 ? 'line' : 'lines'}.
+                </p>
+              )}
+            </div>
+
+            <pre className="max-h-[460px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-5 text-foreground">
+              <code>
+                {formattedQuery.trim() ? (
+                  formattedSearch.lines.length > 0 ? (
+                    <>
+                      {formattedSearch.lines.map((line) => (
+                        <span className="block" key={line.number}>
+                          <span className="select-none text-muted-foreground">
+                            {String(line.number).padStart(4, ' ')} |
+                          </span>{' '}
+                          <HighlightedText
+                            text={line.text}
+                            query={formattedQuery}
+                          />
+                        </span>
+                      ))}
+                      {formattedSearch.limited && (
+                        <span className="block pt-2 text-muted-foreground">
+                          Showing first 80 matching lines.
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    'No matches in the reserialized JSON.'
+                  )
+                ) : (
+                  reserializedPreview
+                )}
+              </code>
             </pre>
           </div>
         </div>

@@ -16,6 +16,10 @@ export const metadata: Metadata = {
   title: 'Desirializer',
   description:
     'Upload or paste JSON and inspect its nested structure with source line spans.',
+  icons: {
+    icon: [{ url: '/desirializer-icon.png', type: 'image/png' }],
+    apple: [{ url: '/desirializer-icon.png', type: 'image/png' }],
+  },
 };
 
 export default function RootLayout({
